@@ -2,6 +2,7 @@ import boto3
 import datetime
 import json
 import os
+import re
 import urllib.request
 from linebot import (LineBotApi, WebhookHandler)
 from linebot.models import (MessageEvent, TextMessage, TextSendMessage)
@@ -48,13 +49,14 @@ def handler(event, context):
     reply_token = request['replyToken']
     message_text = request['message']['text']
 
-    ## 文字数6文字で数値ならdynamodb書き込み -> put record succeeded. / put record failed.
+    ## 追加予定条件
     ## 文字数6文字 + del なら該当レコード削除 -> delete record succeeded. / delete record failed.
     ## それ以外は残数返信 -> total amount - total left. / get left amount faled.
     #### reply_message = ''（not reply_message） の時に稼働？
     reply_message = ''
 
-    if message_text.isnumeric() and len(message_text) == 6:
+    # 数字6桁の場合、dynamodb書き込み -> put record succeeded. / put record failed.
+    if re.compile('[0-9]{6}').search(message_text):
         target_year = message_text[:4]
         target_month = message_text[4:]
 
@@ -71,7 +73,10 @@ def handler(event, context):
             logger.info(failure_message)
             reply_message = failure_message
 
-    else:
+    # else:
+
+    # 条件にあてはまらない場合、残数を返信
+    if reply_message == '':
         # 残数計算
         try:
             left_amount = get_left_amount()
