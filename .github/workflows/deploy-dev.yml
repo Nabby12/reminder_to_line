@@ -1,0 +1,150 @@
+name: Auto Deploy-dev to AWS Lambda
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    types: [closed]
+
+jobs:
+  deploy:
+    name: Auto Deploy-dev
+    runs-on: ubuntu-20.04
+    timeout-minutes: 5
+    if: ${{ github.event.pull_request.merged == true }}
+
+    strategy:
+      matrix:
+        python-version: [3.8]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_FOR_GITHUB_ACTIONS_HUB_USER }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_FOR_GITHUB_ACTIONS_HUB_USER }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          role-to-assume: ${{ secrets.AWS_ASSUME_ROLE_ARN }}
+          role-duration-seconds: 900
+
+      - name: Run npm install for actions
+        working-directory: ./.github/actions/get-ssm-parameters
+        run: npm install
+
+      - name: Get SSM Parameters
+        id: ssm-parameters
+        uses: ./.github/actions/get-ssm-parameters
+        with:
+          default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          lambda_name: ${{ secrets.SSM_PATH_NAME }}
+          env_name: ${{ secrets.ENV_NAME_DEV }}
+          cd_parameters: |-
+            AWS_ACCOUNT_ID
+            AWS_S3_DEPLOY_LAMBDA_BUCKET
+            AWS_CAPABILITIES
+            SLACK_WEBHOOK_GH_NOTIFY
+          parameters: |-
+            AWS_MY_ROLE_NAME
+            AWS_S3_PREFIX
+            AWS_STACK_NAME
+            ALLOWED_IP
+
+      - name: Set SSM Parameters
+        id: set-secrets
+        env:
+          SSM_PARAMETERS: ${{ steps.ssm-parameters.outputs.ssm_parameters }}
+        run: |
+          PARAMETERS_ARRAY=( \
+            AWS_ACCOUNT_ID \
+            AWS_S3_DEPLOY_LAMBDA_BUCKET \
+            AWS_CAPABILITIES \
+            SLACK_WEBHOOK_GH_NOTIFY \
+            AWS_MY_ROLE_NAME \
+            AWS_S3_PREFIX \
+            AWS_STACK_NAME \
+            ALLOWED_IP \
+          )
+          for key in "${PARAMETERS_ARRAY[@]}"; \
+          do \
+              VAR_VALUE="$(jq --arg var_name $key -r '.[$var_name]' <(echo "${SSM_PARAMETERS}"))"; \
+              SET_OUTPUT_STRING="::set-output name=${key}::${VAR_VALUE}"; \
+              ADD_MASK_STRING="::add-mask::${VAR_VALUE}"; \
+              echo "${SET_OUTPUT_STRING}"; echo "${ADD_MASK_STRING}"; \
+          done
+
+      - name: Delete node modules for actions
+        working-directory: ./.github/actions/get-ssm-parameters
+        run: rm -rf node_modules
+
+      - name: Set up Python
+        uses: actions/setup-python@v1
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install SAM
+        run: |
+          python -m pip install --upgrade pip
+          pip install aws-sam-cli
+
+      - name: Add TimeStamp for Deployment
+        run: |
+          BASE_NAME=reminderToLineApiDeployment
+          TIME_STAMP=$(date "+%Y%m%d%H%M%S")
+          sed -i -e "s/${BASE_NAME}/${BASE_NAME}${TIME_STAMP}/g" template.yaml
+
+      - name: Build by SAM
+        run: sam build
+
+      - name: Deploy by SAM
+        env:
+          AWS_STACK_NAME: ${{ steps.set-secrets.outputs.AWS_STACK_NAME }}
+          AWS_S3_DEPLOY_LAMBDA_BUCKET: ${{ steps.set-secrets.outputs.AWS_S3_DEPLOY_LAMBDA_BUCKET }}
+          AWS_S3_PREFIX: ${{ steps.set-secrets.outputs.AWS_S3_PREFIX }}
+          AWS_CAPABILITIES: ${{ steps.set-secrets.outputs.AWS_CAPABILITIES }}
+          AWS_ACCOUNT_ID: ${{ steps.set-secrets.outputs.AWS_ACCOUNT_ID }}
+          AWS_MY_ROLE_NAME: ${{ steps.set-secrets.outputs.AWS_MY_ROLE_NAME }}
+          ALLOWED_IP: ${{ steps.set-secrets.outputs.ALLOWED_IP }}
+        run: |
+          sam deploy \
+            --stack-name "${AWS_STACK_NAME}" \
+            --s3-bucket "${AWS_S3_DEPLOY_LAMBDA_BUCKET}" \
+            --s3-prefix "${AWS_S3_PREFIX}" \
+            --region "${{ secrets.AWS_DEFAULT_REGION }}" \
+            --capabilities "${AWS_CAPABILITIES}" \
+            --no-confirm-changeset \
+            --parameter-overrides \
+              MyRoleId="${AWS_ACCOUNT_ID}" \
+              MyRoleName="${AWS_MY_ROLE_NAME}" \
+              allowedIp="${ALLOWED_IP}" \
+              SsmPathName="${{ secrets.SSM_PATH_NAME }}" \
+              EnvName="${{ secrets.ENV_NAME_DEV }}" \
+            2>&1 \
+            | tee error.json
+
+      - name: Check Deploy Error log
+        id: check-error
+        run: |
+          JOB_NAME="Deploy Lambda"
+          echo "::set-output name=JOB_NAME::$JOB_NAME"
+          ERROR_LOG="$(tail -n 1 error.json)"
+          if [ -n "${ERROR_LOG}" ]; then
+            NO_CHANGE_MESSAGE="No changes to deploy."
+            if [ "$(echo ${ERROR_LOG} | grep "${NO_CHANGE_MESSAGE}")" ]; then
+              JOB_NAME="no changes Deploy Lambda"
+              echo "::set-output name=JOB_NAME::$JOB_NAME"
+            else
+              exit 1
+            fi
+          fi
+
+      - name: Notify result to slack
+        uses: homoluctus/slatify@master
+        if: always()
+        with:
+          type: ${{ job.status }}
+          job_name: ${{ steps.check-error.outputs.JOB_NAME }}
+        env:
+          SLACK_WEBHOOK: ${{ steps.set-secrets.outputs.SLACK_WEBHOOK_GH_NOTIFY }}

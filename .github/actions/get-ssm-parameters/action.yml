@@ -1,0 +1,24 @@
+name: Get SSM Parameters
+description: 'this is an action getting SSM Parameters'
+inputs:
+  default_region:
+    description: 'this aws region'
+    required: true
+  lambda_name:
+    description: 'this Lambda name'
+    required: true
+  env_name:
+    description: 'this env name'
+    required: true
+  cd_parameters:
+    description: 'target SSM Parameters for cd'
+    required: false
+  parameters:
+    description: 'target SSM Parameters'
+    required: false
+outputs:
+  ssm_parameters:
+    description: 'parameters object'
+runs:
+  using: 'node12'
+  main: 'index.js'

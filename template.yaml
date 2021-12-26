@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  reminder-to-line
+
+  SAM Template for reminder-to-line
+
+Parameters:
+  MyRoleId:
+    Type: String
+  MyRoleName:
+    Type: String
+  AllowedIp:
+    Type: String
+  SsmPathName:
+    Type: String
+  EnvName:
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+  Api:
+    OpenApiVersion: 3.0.2
+
+Resources:
+  reminderToLine:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: main.handler
+      Runtime: python3.8
+      Role:
+        Fn::Sub: arn:aws:iam::${MyRoleId}:role/${MyRoleName}
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            Path: '/from_line'
+            Method: post
+            RestApiId: !Ref reminderToLineApi
+      Environment:
+        Variables:
+          SSM_PATH_NAME:
+            Ref: SsmPathName
+          ENV_NAME:
+            Ref: EnvName
+
+  reminderToLinePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref reminderToLine
+      Principal: apigateway.amazonaws.com
+
+  ## deployment名を変えないとステージがデプロイされないため github actions 内から名称の末尾にタイムスタンプ付与
+  ## スタックがない状態の初回デプロイには失敗するため、初回のみ deployment 部分をコメントアウトしてデプロイ
+  reminderToLineApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties: 
+      Description: Deployed by GitHub Actions
+      RestApiId: !Ref reminderToLineApi
+      StageName: !Sub ${EnvName}
+
+  reminderToLineApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub ${EnvName}-reminder-to-line-api
+      StageName: !Sub ${EnvName}
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource:
+              - 'execute-api:/*/*/*'
+            Condition:
+              IpAddress:
+                aws:SourceIp:
+                  - !Sub ${AllowedIp}
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: reminder-to-line-api
+        schemes:
+          - https
+        paths:
+          /from_line:
+            post:
+              x-amazon-apigateway-integration:
+                  responses:
+                    default:
+                      statusCode: '200'
+                  uri:
+                    Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${reminderToLine.Arn}/invocations
+                  passthroughBehavior: 'when_no_match'
+                  httpMethod: 'POST'
+                  contentHandling: 'CONVERT_TO_TEXT'
+                  type: 'aws_proxy'
+                  RequestTemplates:
+                    "application/json": '{ "success": true, "message": $context.error.messageString, "data": {} }'
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseTemplates:
+            "application/json": '{ "success": false, "message": $context.error.messageString, "data": {} }'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Accept,Cache-Control,X-Requested-With,Content-Type'"
+              Access-Control-Allow-Methods: "'OPTIONS,POST'"
+        DEFAULT_5XX:
+          ResponseTemplates:
+            "application/json": '{ "success": false, "message": $context.error.messageString, "data": {} }'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Accept,Cache-Control,X-Requested-With,Content-Type'"
+              Access-Control-Allow-Methods: "'OPTIONS,POST'"
+
+Outputs:
+  reminderToLine:
+    Value: !GetAtt reminderToLine.Arn
